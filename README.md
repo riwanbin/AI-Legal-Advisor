@@ -41,7 +41,8 @@ See [PLAN.md](./PLAN.md) for the full comprehensive project plan.
 | RAG Framework | LlamaIndex |
 | Vector DB | ChromaDB |
 | Knowledge Graph | Neo4j |
-| LLM | Gemini 1.5 Pro / GPT-4o |
+| LLM | `gemini-2.5-flash-lite` (free tier) |
+| Embeddings | `gemini-embedding-001` (free tier, 3072d) |
 
 ## License
 

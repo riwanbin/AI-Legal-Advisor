@@ -289,8 +289,8 @@ Raw Data (PDF/CSV/XML)
 | **RAG Framework** | LlamaIndex | Industry leader for advanced retrieval (GraphRAG, Parent-Child, Hybrid Search) |
 | **Vector Database** | ChromaDB (local) | Zero-config, perfect for lab experimentation |
 | **Knowledge Graph** | Neo4j (local via Docker) | For GraphRAG — mapping legal cross-references |
-| **LLM (Agent)** | Gemini 1.5 Pro / OpenAI GPT-4o | Strong tool-calling and reasoning capabilities |
-| **Embedding Model** | `text-embedding-3-small` or HuggingFace BGE | For vectorizing legal text |
+| **LLM (Agent)** | `gemini-2.5-flash-lite` (Gemini free tier) | Fast, cost-free, good reasoning for lab iteration |
+| **Embedding Model** | `gemini-embedding-001` (Gemini free tier, 3072 dims) | High-quality text embeddings for legal retrieval |
 | **Re-ranker** | Cohere Rerank / Cross-Encoder | For Hybrid Search result re-ordering |
 
 ### Phase 2 — Backend (After Lab Stabilization)
