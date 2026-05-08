@@ -215,80 +215,100 @@ os.makedirs(CHROMA_DIR, exist_ok=True)
 
 chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
 
-# Delete old collection and recreate to start clean
-try:
-    chroma_client.delete_collection("indian_laws")
-    print("  [INFO] Deleted old collection to rebuild from scratch.")
-except:
-    pass
-
 collection = chroma_client.get_or_create_collection(
     name="indian_laws",
     metadata={"description": "Indian Bare Acts - Section-level embeddings"}
 )
 
-print(f"  [INFO] {len(all_documents)} sections to embed.")
+# Resumable: skip sections already in the collection
+existing_ids = set(collection.get()["ids"])
+new_docs = [d for d in all_documents if d["id"] not in existing_ids]
 
-# Batch embed — embed texts individually and collect into batches for ChromaDB
-BATCH_SIZE = 20  # Free tier friendly
-total_batches = (len(all_documents) + BATCH_SIZE - 1) // BATCH_SIZE
+if not new_docs:
+    print(f"  [SKIP] All {len(all_documents)} sections already in ChromaDB.")
+else:
+    print(f"  [INFO] {len(new_docs)} new sections to embed (skipping {len(existing_ids)} already in DB).")
 
-for batch_idx in range(total_batches):
-    start = batch_idx * BATCH_SIZE
-    end = min(start + BATCH_SIZE, len(all_documents))
-    batch = all_documents[start:end]
+    # TRUE batch embedding: send a list of texts in ONE API call.
+    # The Gemini embed_content API accepts a list of strings and returns
+    # one embedding per string. This uses 1 API call per batch (not 1 per text).
+    # Free tier: 1000 calls/day, so 100 texts/batch = only 20 calls for 1930 sections.
+    BATCH_SIZE = 100  # Max texts per embed_content call
+    total_batches = (len(new_docs) + BATCH_SIZE - 1) // BATCH_SIZE
 
-    texts = [d["text"] for d in batch]
-    ids = [d["id"] for d in batch]
-    metadatas = [d["metadata"] for d in batch]
+    for batch_idx in range(total_batches):
+        start = batch_idx * BATCH_SIZE
+        end = min(start + BATCH_SIZE, len(new_docs))
+        batch = new_docs[start:end]
 
-    try:
-        # Embed each text individually to avoid batching issues
-        embeddings = []
-        for text in texts:
+        texts = [d["text"] for d in batch]
+        ids = [d["id"] for d in batch]
+        metadatas = [d["metadata"] for d in batch]
+
+        try:
+            # One API call for the entire batch
             response = client.models.embed_content(
                 model="gemini-embedding-2",
-                contents=text,
+                contents=texts,
             )
-            embeddings.append(response.embeddings[0].values)
 
-        # Add batch to ChromaDB
-        collection.add(
-            ids=ids,
-            embeddings=embeddings,
-            documents=texts,
-            metadatas=metadatas,
-        )
+            # Extract embeddings - response.embeddings is a list
+            embeddings = [e.values for e in response.embeddings]
 
-        print(f"  [OK] Batch {batch_idx + 1}/{total_batches}: embedded {len(batch)} sections. (Total: {end}/{len(all_documents)})")
+            if len(embeddings) != len(texts):
+                # Fallback: if batch response doesn't match, embed individually
+                print(f"  [WARN] Batch {batch_idx+1}: got {len(embeddings)} embeddings for {len(texts)} texts. Falling back to individual calls...")
+                embeddings = []
+                for text in texts:
+                    resp = client.models.embed_content(
+                        model="gemini-embedding-2",
+                        contents=text,
+                    )
+                    embeddings.append(resp.embeddings[0].values)
 
-    except Exception as e:
-        print(f"  [FAIL] Batch {batch_idx + 1} failed: {e}")
-        print(f"         Waiting 60s before retry (rate limit)...")
-        time.sleep(60)
-        try:
-            embeddings = []
-            for text in texts:
-                response = client.models.embed_content(
-                    model="gemini-embedding-2",
-                    contents=text,
-                )
-                embeddings.append(response.embeddings[0].values)
-
+            # Add batch to ChromaDB
             collection.add(
                 ids=ids,
                 embeddings=embeddings,
                 documents=texts,
                 metadatas=metadatas,
             )
-            print(f"  [OK] Batch {batch_idx + 1}/{total_batches}: retry succeeded.")
-        except Exception as e2:
-            print(f"  [FAIL] Batch {batch_idx + 1} retry also failed: {e2}")
-            print(f"         Skipping this batch. Re-run the script later.")
 
-    # Rate limit: be nice to the free tier
-    if batch_idx < total_batches - 1:
-        time.sleep(1)
+            print(f"  [OK] Batch {batch_idx + 1}/{total_batches}: embedded {len(batch)} sections. (Total: {end + len(existing_ids)}/{len(all_documents)})")
+
+        except Exception as e:
+            print(f"  [FAIL] Batch {batch_idx + 1} failed: {e}")
+            print(f"         Waiting 65s before retry (rate limit)...")
+            time.sleep(65)
+            try:
+                response = client.models.embed_content(
+                    model="gemini-embedding-2",
+                    contents=texts,
+                )
+                embeddings = [e.values for e in response.embeddings]
+                if len(embeddings) != len(texts):
+                    embeddings = []
+                    for text in texts:
+                        resp = client.models.embed_content(
+                            model="gemini-embedding-2",
+                            contents=text,
+                        )
+                        embeddings.append(resp.embeddings[0].values)
+
+                collection.add(
+                    ids=ids,
+                    embeddings=embeddings,
+                    documents=texts,
+                    metadatas=metadatas,
+                )
+                print(f"  [OK] Batch {batch_idx + 1}/{total_batches}: retry succeeded.")
+            except Exception as e2:
+                print(f"  [FAIL] Batch {batch_idx + 1} retry also failed: {e2}")
+                print(f"         Skipping this batch. Re-run the script to resume.")
+
+        # Rate limit: 100 RPM on free tier - be conservative
+        if batch_idx < total_batches - 1:
+            time.sleep(2)
 
 # ================================================================
 # STEP 4: Verify the database
