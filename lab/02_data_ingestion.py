@@ -26,7 +26,7 @@ def print(*args, **kwargs):
     _print(*args, **kwargs)
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(override=True)
 
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
@@ -229,11 +229,11 @@ if not new_docs:
 else:
     print(f"  [INFO] {len(new_docs)} new sections to embed (skipping {len(existing_ids)} already in DB).")
 
-    # TRUE batch embedding: send a list of texts in ONE API call.
-    # The Gemini embed_content API accepts a list of strings and returns
-    # one embedding per string. This uses 1 API call per batch (not 1 per text).
-    # Free tier: 1000 calls/day, so 100 texts/batch = only 20 calls for 1930 sections.
-    BATCH_SIZE = 100  # Max texts per embed_content call
+    # Embed individually but with smart rate limiting.
+    # Free tier: 100 requests/min, 1000 requests/day.
+    # Strategy: batches of 20 texts, 15s pause between batches = ~80 RPM (safe under 100).
+    # 990 texts = ~50 batches × 15s = ~12.5 minutes total.
+    BATCH_SIZE = 20
     total_batches = (len(new_docs) + BATCH_SIZE - 1) // BATCH_SIZE
 
     for batch_idx in range(total_batches):
@@ -246,27 +246,14 @@ else:
         metadatas = [d["metadata"] for d in batch]
 
         try:
-            # One API call for the entire batch
-            response = client.models.embed_content(
-                model="gemini-embedding-2",
-                contents=texts,
-            )
+            embeddings = []
+            for text in texts:
+                resp = client.models.embed_content(
+                    model="gemini-embedding-2",
+                    contents=text,
+                )
+                embeddings.append(resp.embeddings[0].values)
 
-            # Extract embeddings - response.embeddings is a list
-            embeddings = [e.values for e in response.embeddings]
-
-            if len(embeddings) != len(texts):
-                # Fallback: if batch response doesn't match, embed individually
-                print(f"  [WARN] Batch {batch_idx+1}: got {len(embeddings)} embeddings for {len(texts)} texts. Falling back to individual calls...")
-                embeddings = []
-                for text in texts:
-                    resp = client.models.embed_content(
-                        model="gemini-embedding-2",
-                        contents=text,
-                    )
-                    embeddings.append(resp.embeddings[0].values)
-
-            # Add batch to ChromaDB
             collection.add(
                 ids=ids,
                 embeddings=embeddings,
@@ -274,26 +261,20 @@ else:
                 metadatas=metadatas,
             )
 
-            print(f"  [OK] Batch {batch_idx + 1}/{total_batches}: embedded {len(batch)} sections. (Total: {end + len(existing_ids)}/{len(all_documents)})")
+            print(f"  [OK] Batch {batch_idx + 1}/{total_batches}: {len(batch)} sections. (Total: {end + len(existing_ids)}/{len(all_documents)})")
 
         except Exception as e:
             print(f"  [FAIL] Batch {batch_idx + 1} failed: {e}")
-            print(f"         Waiting 65s before retry (rate limit)...")
+            print(f"         Waiting 65s before retry...")
             time.sleep(65)
             try:
-                response = client.models.embed_content(
-                    model="gemini-embedding-2",
-                    contents=texts,
-                )
-                embeddings = [e.values for e in response.embeddings]
-                if len(embeddings) != len(texts):
-                    embeddings = []
-                    for text in texts:
-                        resp = client.models.embed_content(
-                            model="gemini-embedding-2",
-                            contents=text,
-                        )
-                        embeddings.append(resp.embeddings[0].values)
+                embeddings = []
+                for text in texts:
+                    resp = client.models.embed_content(
+                        model="gemini-embedding-2",
+                        contents=text,
+                    )
+                    embeddings.append(resp.embeddings[0].values)
 
                 collection.add(
                     ids=ids,
@@ -303,12 +284,12 @@ else:
                 )
                 print(f"  [OK] Batch {batch_idx + 1}/{total_batches}: retry succeeded.")
             except Exception as e2:
-                print(f"  [FAIL] Batch {batch_idx + 1} retry also failed: {e2}")
-                print(f"         Skipping this batch. Re-run the script to resume.")
+                print(f"  [FAIL] Batch {batch_idx + 1} retry failed: {e2}")
+                print(f"         Skipping batch. Re-run script to resume.")
 
-        # Rate limit: 100 RPM on free tier - be conservative
+        # Rate limit: 20 calls then pause 15s = ~80 RPM (safe under 100 RPM limit)
         if batch_idx < total_batches - 1:
-            time.sleep(2)
+            time.sleep(15)
 
 # ================================================================
 # STEP 4: Verify the database
